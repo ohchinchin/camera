@@ -382,8 +382,8 @@
             // タイムスタンプ合成
             const now = new Date();
             const timestamp = now.toLocaleString('ja-JP');
-            const periodStart = lastUploadTime.toLocaleTimeString('ja-JP');
-            const periodEnd = now.toLocaleTimeString('ja-JP');
+            const periodStart = lastUploadTime.toLocaleString('ja-JP');
+            const periodEnd = now.toLocaleString('ja-JP');
 
             context.fillStyle = "rgba(0, 0, 0, 0.5)";
             context.fillRect(0, canvas.height - 30, canvas.width, 30);
