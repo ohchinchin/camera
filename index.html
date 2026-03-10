@@ -121,14 +121,23 @@
 </head>
 <body>
     <div class="container">
-        <h1>定点観測カメラ</h1>
+        <h1>定点観測カメラ + 人数カウント</h1>
         
         <div id="video-container">
             <video id="video" autoplay playsinline muted></video>
+            <canvas id="overlay" style="position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none;"></canvas>
             <div id="burn-in-overlay">焼き付き防止モード動作中...</div>
         </div>
 
+        <div class="status-box" style="background: #fff0f0; border: 1px solid #ffccc7; margin-bottom: 10px;">
+            通過人数 (累計): <span id="count-display" style="font-size: 1.5rem; color: #ff4d4f; font-weight: bold;">0</span> 人
+        </div>
+
         <div class="settings">
+            <div class="toggle-row">
+                <input type="checkbox" id="setting-counter-mode" checked>
+                <label for="setting-counter-mode">AI通過カウントを有効にする</label>
+            </div>
             <div class="settings-row">
                 <label>撮影間隔 (分):</label>
                 <input type="number" id="setting-interval" value="60" min="1" max="1440" style="width: 60px;">
@@ -157,12 +166,19 @@
             <div id="next-shot" style="margin-top:5px; color:#555;"></div>
         </div>
 
-        <div id="log"></div>
+    <div id="log"></div>
     </div>
 
+    <!-- TensorFlow.js & COCO-SSD -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
     <script src="https://unpkg.com/nosleep.js/dist/NoSleep.min.js"></script>
     <script>
         const video = document.getElementById('video');
+        const overlay = document.getElementById('overlay');
+        const countDisplay = document.getElementById('count-display');
+        const ctxOverlay = overlay.getContext('2d');
+        
         const btnStart = document.getElementById('btn-start');
         const btnStop = document.getElementById('btn-stop');
         const statusText = document.getElementById('status-text');
@@ -174,6 +190,7 @@
         const inputEnd = document.getElementById('setting-end');
         const inputBurnIn = document.getElementById('setting-burn-in');
         const burnInOverlay = document.getElementById('burn-in-overlay');
+        const inputCounterMode = document.getElementById('setting-counter-mode');
 
         const noSleep = new NoSleep();
         let intervalId = null;
@@ -209,7 +226,60 @@
 
         initCamera();
 
-        // バッテリー情報取得 (iOSでは制限される可能性あり)
+        // AIモデルのロード
+        let model = null;
+        let totalCrossed = 0;
+        let prevPersonPositions = [];
+
+        async function loadModel() {
+            addLog("AIモデル読み込み中... (数MBあります)");
+            model = await cocoSsd.load();
+            addLog("AIモデル準備完了");
+            detectFrame();
+        }
+
+        async function detectFrame() {
+            if (model && inputCounterMode.checked) {
+                const predictions = await model.detect(video);
+                processDetections(predictions);
+            }
+            requestAnimationFrame(detectFrame);
+        }
+
+        function processDetections(predictions) {
+            overlay.width = video.videoWidth;
+            overlay.height = video.videoHeight;
+            ctxOverlay.clearRect(0, 0, overlay.width, overlay.height);
+
+            const lineY = overlay.height / 2;
+            ctxOverlay.strokeStyle = "red";
+            ctxOverlay.lineWidth = 5;
+            ctxOverlay.beginPath(); ctxOverlay.moveTo(0, lineY); ctxOverlay.lineTo(overlay.width, lineY); ctxOverlay.stroke();
+
+            const currentPersons = predictions.filter(p => p.class === "person");
+            const currentPositions = [];
+
+            currentPersons.forEach(person => {
+                const [x, y, width, height] = person.bbox;
+                const centerY = y + height / 2;
+                currentPositions.push(centerY);
+                ctxOverlay.strokeStyle = "#00FF00"; ctxOverlay.lineWidth = 2; ctxOverlay.strokeRect(x, y, width, height);
+
+                const prevY = prevPersonPositions.find(py => Math.abs(py - centerY) < 100);
+                if (prevY !== undefined) {
+                    if ((prevY < lineY && centerY >= lineY) || (prevY > lineY && centerY <= lineY)) {
+                        totalCrossed++;
+                        countDisplay.innerText = totalCrossed;
+                        addLog("通過を検知しました！累計: " + totalCrossed);
+                    }
+                }
+            });
+            prevPersonPositions = currentPositions;
+        }
+
+        loadModel();
+
+        // バッテリー情報取得
         async function getBatteryInfo() {
             try {
                 if (navigator.getBattery) {
@@ -222,31 +292,25 @@
             return "バッテリー情報: 取得不可";
         }
 
-        // スケジュール判定 (HH:mm 形式)
+        // スケジュール判定
         function isWithinSchedule() {
             const now = new Date();
             const currentTime = now.getHours() * 60 + now.getMinutes();
-            
             const [startH, startM] = inputStart.value.split(':').map(Number);
             const [endH, endM] = inputEnd.value.split(':').map(Number);
-            
             const startTime = startH * 60 + startM;
             const endTime = endH * 60 + endM;
 
-            if (endTime < startTime) {
-                return currentTime >= startTime || currentTime <= endTime;
-            }
+            if (endTime < startTime) return currentTime >= startTime || currentTime <= endTime;
             return currentTime >= startTime && currentTime <= endTime;
         }
 
         btnStart.addEventListener('click', async () => {
             noSleep.enable();
-            addLog("スリープ防止有効化");
-
+            addLog("観測開始");
             btnStart.style.display = 'none';
             btnStop.style.display = 'block';
             statusText.innerText = "観測中";
-            
             runCycle();
             const intervalMinutes = parseInt(inputInterval.value) || 60;
             intervalId = setInterval(runCycle, intervalMinutes * 60000);
@@ -259,16 +323,15 @@
             btnStop.style.display = 'none';
             statusText.innerText = "停止中";
             nextShotText.innerText = "";
-            addLog("撮影を停止しました");
+            addLog("停止しました");
         });
 
         async function runCycle() {
             if (isWithinSchedule()) {
                 await captureAndUploadWithRetry(0);
             } else {
-                addLog("スケジュール外のためスキップ");
+                addLog("スケジュール外スキップ");
             }
-            
             const intervalMinutes = parseInt(inputInterval.value) || 60;
             const next = new Date(Date.now() + intervalMinutes * 60000);
             nextShotText.innerText = `次回撮影予定: ${next.toLocaleTimeString()}`;
@@ -277,37 +340,32 @@
         async function captureAndUploadWithRetry(retryCount) {
             const success = await captureAndUpload();
             if (!success && retryCount < 1) {
-                addLog("10秒後にリトライします...");
                 setTimeout(() => captureAndUploadWithRetry(retryCount + 1), 10000);
             }
         }
 
         async function captureAndUpload() {
-            addLog("撮影中...");
+            addLog("撮影・送信中...");
             const canvas = document.createElement('canvas');
             const context = canvas.getContext('2d');
             const maxWidth = 800;
             const scale = maxWidth / video.videoWidth;
-            canvas.width = maxWidth;
-            canvas.height = video.videoHeight * scale;
-            
-            // 画像描画
+            canvas.width = maxWidth; canvas.height = video.videoHeight * scale;
             context.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-            // タイムスタンプ合成 (Feature 2)
+            // タイムスタンプ合成
             const now = new Date();
             const timestamp = now.toLocaleString('ja-JP');
             context.fillStyle = "rgba(0, 0, 0, 0.5)";
             context.fillRect(0, canvas.height - 30, canvas.width, 30);
-            context.fillStyle = "white";
-            context.font = "16px sans-serif";
-            context.fillText(timestamp, 10, canvas.height - 8);
+            context.fillStyle = "white"; context.font = "16px sans-serif";
+            context.fillText(`${timestamp} | 通過: ${totalCrossed}人`, 10, canvas.height - 8);
 
             const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
             const base64Data = dataUrl.split(',')[1];
             
             const battery = await getBatteryInfo();
-            const caption = `${timestamp}\n${battery}`;
+            const caption = `【定期報告】\n日時: ${timestamp}\n通過人数: ${totalCrossed}人\n${battery}`;
 
             try {
                 const response = await fetch('/api/upload', {
@@ -317,14 +375,13 @@
                 });
 
                 if (response.ok) {
-                    addLog("送信成功");
+                    addLog("送信成功（カウントをリセットします）");
+                    totalCrossed = 0; // 送信後にカウントリセット
+                    countDisplay.innerText = totalCrossed;
                     return true;
-                } else {
-                    addLog("送信失敗: " + await response.text());
-                    return false;
                 }
+                return false;
             } catch (err) {
-                addLog("通信エラー: " + err.message);
                 return false;
             }
         }
