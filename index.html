@@ -10,6 +10,7 @@
             --text-color: #333333;
             --primary-blue: #0070f3;
             --primary-red: #ff4d4f;
+            --card-bg: #ffffff;
         }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -19,56 +20,78 @@
             display: flex;
             flex-direction: column;
             align-items: center;
-            justify-content: center;
             min-height: 100vh;
+            padding: 10px;
         }
         .container {
             width: 100%;
-            max-width: 600px;
+            max-width: 500px;
+            background: var(--card-bg);
             padding: 20px;
-            box-sizing: border-box;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.05);
             text-align: center;
         }
+        h1 { font-size: 1.5rem; margin-bottom: 15px; }
         video {
             width: 100%;
             border-radius: 8px;
             background-color: #000;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-            transform: scaleX(1); /* リアカメラ用 */
+            margin-bottom: 15px;
+        }
+        .settings {
+            background: #f9f9fb;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            text-align: left;
+            font-size: 0.9rem;
+        }
+        .settings-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .settings-row:last-child { margin-bottom: 0; }
+        input[type="number"], input[type="time"] {
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 1rem;
         }
         .controls {
-            margin-top: 20px;
             display: flex;
             flex-direction: column;
-            gap: 15px;
+            gap: 10px;
         }
         button {
-            padding: 15px 30px;
-            font-size: 1.2rem;
+            padding: 15px;
+            font-size: 1.1rem;
             font-weight: bold;
             border: none;
             border-radius: 8px;
             cursor: pointer;
-            transition: opacity 0.2s;
-        }
-        button:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
         }
         #btn-start { background-color: var(--primary-blue); color: white; }
         #btn-stop { background-color: var(--primary-red); color: white; display: none; }
-        .status { margin-top: 15px; font-size: 0.9rem; color: #666; }
+        .status-box {
+            margin-top: 15px;
+            padding: 10px;
+            background: #eef2ff;
+            border-radius: 6px;
+            font-size: 0.85rem;
+        }
         #log {
-            margin-top: 20px;
-            font-size: 0.8rem;
+            margin-top: 15px;
+            font-size: 0.75rem;
             text-align: left;
-            background: #eee;
+            background: #333;
+            color: #eee;
             padding: 10px;
             border-radius: 4px;
-            max-height: 100px;
+            max-height: 120px;
             overflow-y: auto;
-            width: 100%;
-            box-sizing: border-box;
         }
     </style>
 </head>
@@ -76,11 +99,35 @@
     <div class="container">
         <h1>定点観測カメラ</h1>
         <video id="video" autoplay playsinline muted></video>
+
+        <div class="settings">
+            <div class="settings-row">
+                <label>撮影間隔 (分):</label>
+                <input type="number" id="setting-interval" value="60" min="1" max="1440" style="width: 60px;">
+            </div>
+            <div class="settings-row">
+                <label>開始時刻:</label>
+                <input type="time" id="setting-start" value="09:00">
+            </div>
+            <div class="settings-row">
+                <label>終了時刻:</label>
+                <input type="time" id="setting-end" value="18:00">
+            </div>
+            <div style="font-size: 0.7rem; color: #888; margin-top: 5px;">
+                ※スケジュール外は送信をスキップします。
+            </div>
+        </div>
+
         <div class="controls">
             <button id="btn-start">撮影開始</button>
             <button id="btn-stop">撮影停止</button>
         </div>
-        <div class="status" id="status-text">待機中...</div>
+
+        <div class="status-box">
+            状態: <span id="status-text" style="font-weight: bold;">待機中</span>
+            <div id="next-shot" style="margin-top:5px; color:#555;"></div>
+        </div>
+
         <div id="log"></div>
     </div>
 
@@ -90,73 +137,104 @@
         const btnStart = document.getElementById('btn-start');
         const btnStop = document.getElementById('btn-stop');
         const statusText = document.getElementById('status-text');
+        const nextShotText = document.getElementById('next-shot');
         const log = document.getElementById('log');
-        const noSleep = new NoSleep();
+        
+        const inputInterval = document.getElementById('setting-interval');
+        const inputStart = document.getElementById('setting-start');
+        const inputEnd = document.getElementById('setting-end');
 
+        const noSleep = new NoSleep();
         let intervalId = null;
-        const INTERVAL_MS = 60000; // 60秒
 
         function addLog(msg) {
             const time = new Date().toLocaleTimeString();
             log.innerHTML = `[${time}] ${msg}<br>` + log.innerHTML;
         }
 
-        // カメラ起動
         async function initCamera() {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: { ideal: "environment" } }, // idealを使ってフォールバックしやすく
+                    video: { facingMode: { ideal: "environment" } },
                     audio: false
                 });
                 video.srcObject = stream;
                 addLog("カメラを起動しました");
             } catch (err) {
                 addLog("カメラ起動失敗: " + err.message);
-                alert("カメラの許可が必要です。");
             }
         }
 
-        // 初期化実行
         initCamera();
+
+        // スケジュール判定 (HH:mm 形式)
+        function isWithinSchedule() {
+            const now = new Date();
+            const currentTime = now.getHours() * 60 + now.getMinutes();
+            
+            const [startH, startM] = inputStart.value.split(':').map(Number);
+            const [endH, endM] = inputEnd.value.split(':').map(Number);
+            
+            const startTime = startH * 60 + startM;
+            const endTime = endH * 60 + endM;
+
+            // 終了が開始より前（日またぎ）の場合
+            if (endTime < startTime) {
+                return currentTime >= startTime || currentTime <= endTime;
+            }
+            return currentTime >= startTime && currentTime <= endTime;
+        }
 
         btnStart.addEventListener('click', async () => {
             noSleep.enable();
-            addLog("スリープ防止を有効化しました");
+            addLog("スリープ防止有効化");
 
             btnStart.style.display = 'none';
-            btnStop.style.display = 'inline-block';
-            statusText.innerText = "観測中...";
+            btnStop.style.display = 'block';
+            statusText.innerText = "観測中";
+            
+            const intervalMinutes = parseInt(inputInterval.value) || 60;
+            const intervalMs = intervalMinutes * 60000;
 
-            // 初回撮影
-            captureAndUpload();
+            // 初回実行
+            runCycle();
 
-            // 定期実行
-            intervalId = setInterval(captureAndUpload, INTERVAL_MS);
+            intervalId = setInterval(runCycle, intervalMs);
         });
 
         btnStop.addEventListener('click', () => {
             noSleep.disable();
             clearInterval(intervalId);
-            btnStart.style.display = 'inline-block';
+            btnStart.style.display = 'block';
             btnStop.style.display = 'none';
             statusText.innerText = "停止中";
+            nextShotText.innerText = "";
             addLog("撮影を停止しました");
         });
+
+        async function runCycle() {
+            if (isWithinSchedule()) {
+                await captureAndUpload();
+            } else {
+                addLog("スケジュール外のためスキップしました");
+            }
+            
+            // 次回予定の表示
+            const intervalMinutes = parseInt(inputInterval.value) || 60;
+            const next = new Date(Date.now() + intervalMinutes * 60000);
+            nextShotText.innerText = `次回撮影予定: ${next.toLocaleTimeString()}`;
+        }
 
         async function captureAndUpload() {
             addLog("撮影中...");
             const canvas = document.createElement('canvas');
             const context = canvas.getContext('2d');
-
-            // iPhone 7 Plus の性能を考慮し、最大幅 800px に縮小
             const maxWidth = 800;
             const scale = maxWidth / video.videoWidth;
             canvas.width = maxWidth;
             canvas.height = video.videoHeight * scale;
-
             context.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-            // JPEG圧縮 (品質 0.6)
             const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
             const base64Data = dataUrl.split(',')[1];
 
@@ -170,8 +248,7 @@
                 if (response.ok) {
                     addLog("送信成功");
                 } else {
-                    const err = await response.text();
-                    addLog("送信失敗: " + err);
+                    addLog("送信失敗: " + await response.text());
                 }
             } catch (err) {
                 addLog("通信エラー: " + err.message);
