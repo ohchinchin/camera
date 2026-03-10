@@ -131,12 +131,18 @@
 
         <div class="status-box" style="background: #fff0f0; border: 1px solid #ffccc7; margin-bottom: 10px;">
             通過人数 (累計): <span id="count-display" style="font-size: 1.5rem; color: #ff4d4f; font-weight: bold;">0</span> 人
+            <button id="btn-reset-count" style="margin-left:10px; padding:5px 10px; font-size:0.7rem; background:#888; color:white; border-radius:4px;">リセット</button>
         </div>
 
         <div class="settings">
             <div class="toggle-row">
                 <input type="checkbox" id="setting-counter-mode" checked>
                 <label for="setting-counter-mode">AI通過カウントを有効にする</label>
+            </div>
+            <div class="settings-row" style="margin-top:10px;">
+                <label>認識感度 (高いほど厳格):</label>
+                <input type="range" id="setting-threshold" min="0.4" max="0.9" step="0.05" value="0.6">
+                <span id="threshold-value">0.6</span>
             </div>
             <div class="settings-row">
                 <label>撮影間隔 (分):</label>
@@ -191,9 +197,24 @@
         const inputBurnIn = document.getElementById('setting-burn-in');
         const burnInOverlay = document.getElementById('burn-in-overlay');
         const inputCounterMode = document.getElementById('setting-counter-mode');
+        const inputThreshold = document.getElementById('setting-threshold');
+        const thresholdValue = document.getElementById('threshold-value');
+        const btnResetCount = document.getElementById('btn-reset-count');
 
         const noSleep = new NoSleep();
         let intervalId = null;
+
+        // 感度表示の更新
+        inputThreshold.addEventListener('input', () => {
+            thresholdValue.innerText = inputThreshold.value;
+        });
+
+        // カウントのリセット
+        btnResetCount.addEventListener('click', () => {
+            totalCrossed = 0;
+            countDisplay.innerText = totalCrossed;
+            addLog("カウントを手動リセットしました");
+        });
 
         // 焼き付き防止の切り替え
         inputBurnIn.addEventListener('change', () => {
@@ -242,7 +263,9 @@
         async function detectFrame() {
             if (model && inputCounterMode.checked) {
                 const predictions = await model.detect(video);
-                processDetections(predictions);
+                // 設定された感度（threshold）でフィルタリング
+                const filtered = predictions.filter(p => p.score >= parseFloat(inputThreshold.value));
+                processDetections(filtered);
             }
             requestAnimationFrame(detectFrame);
         }
@@ -252,26 +275,28 @@
             overlay.height = video.videoHeight;
             ctxOverlay.clearRect(0, 0, overlay.width, overlay.height);
 
-            const lineY = overlay.height / 2;
+            // 垂直ライン (中央)
+            const lineX = overlay.width / 2;
             ctxOverlay.strokeStyle = "red";
             ctxOverlay.lineWidth = 5;
-            ctxOverlay.beginPath(); ctxOverlay.moveTo(0, lineY); ctxOverlay.lineTo(overlay.width, lineY); ctxOverlay.stroke();
+            ctxOverlay.beginPath(); ctxOverlay.moveTo(lineX, 0); ctxOverlay.lineTo(lineX, overlay.height); ctxOverlay.stroke();
 
             const currentPersons = predictions.filter(p => p.class === "person");
             const currentPositions = [];
 
             currentPersons.forEach(person => {
                 const [x, y, width, height] = person.bbox;
-                const centerY = y + height / 2;
-                currentPositions.push(centerY);
+                const centerX = x + width / 2;
+                currentPositions.push(centerX);
                 ctxOverlay.strokeStyle = "#00FF00"; ctxOverlay.lineWidth = 2; ctxOverlay.strokeRect(x, y, width, height);
 
-                const prevY = prevPersonPositions.find(py => Math.abs(py - centerY) < 100);
-                if (prevY !== undefined) {
-                    if ((prevY < lineY && centerY >= lineY) || (prevY > lineY && centerY <= lineY)) {
+                // 左右の通過判定 (前回と今回の centerX を比較)
+                const prevX = prevPersonPositions.find(px => Math.abs(px - centerX) < 100);
+                if (prevX !== undefined) {
+                    if ((prevX < lineX && centerX >= lineX) || (prevX > lineX && centerX <= lineX)) {
                         totalCrossed++;
                         countDisplay.innerText = totalCrossed;
-                        addLog("通過を検知しました！累計: " + totalCrossed);
+                        addLog("通過(左右)を検知！累計: " + totalCrossed);
                     }
                 }
             });
