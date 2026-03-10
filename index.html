@@ -230,6 +230,7 @@
         let model = null;
         let totalCrossed = 0;
         let prevPersonPositions = [];
+        let lastUploadTime = new Date(); // 測定開始時刻を保持
 
         async function loadModel() {
             addLog("AIモデル読み込み中... (数MBあります)");
@@ -356,6 +357,9 @@
             // タイムスタンプ合成
             const now = new Date();
             const timestamp = now.toLocaleString('ja-JP');
+            const periodStart = lastUploadTime.toLocaleTimeString('ja-JP');
+            const periodEnd = now.toLocaleTimeString('ja-JP');
+
             context.fillStyle = "rgba(0, 0, 0, 0.5)";
             context.fillRect(0, canvas.height - 30, canvas.width, 30);
             context.fillStyle = "white"; context.font = "16px sans-serif";
@@ -365,7 +369,7 @@
             const base64Data = dataUrl.split(',')[1];
             
             const battery = await getBatteryInfo();
-            const caption = `【定期報告】\n日時: ${timestamp}\n通過人数: ${totalCrossed}人\n${battery}`;
+            const caption = `【👤 人数カウント報告】\n📅 測定期間: ${periodStart} 〜 ${periodEnd}\n👥 通過人数: ${totalCrossed} 人\n${battery}`;
 
             try {
                 const response = await fetch('/api/upload', {
@@ -375,9 +379,10 @@
                 });
 
                 if (response.ok) {
-                    addLog("送信成功（カウントをリセットします）");
+                    addLog("送信成功（カウントをリセット）");
                     totalCrossed = 0; // 送信後にカウントリセット
                     countDisplay.innerText = totalCrossed;
+                    lastUploadTime = new Date(); // 次回の開始時刻を更新
                     return true;
                 }
                 return false;
