@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>iPhone 7 Plus 定点観測カメラ</title>
+    <style>
+        :root {
+            --bg-color: #f4f4f9;
+            --text-color: #333333;
+            --primary-blue: #0070f3;
+            --primary-red: #ff4d4f;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+        }
+        .container {
+            width: 100%;
+            max-width: 600px;
+            padding: 20px;
+            box-sizing: border-box;
+            text-align: center;
+        }
+        video {
+            width: 100%;
+            border-radius: 8px;
+            background-color: #000;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            transform: scaleX(1); /* リアカメラ用 */
+        }
+        .controls {
+            margin-top: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        button {
+            padding: 15px 30px;
+            font-size: 1.2rem;
+            font-weight: bold;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        #btn-start { background-color: var(--primary-blue); color: white; }
+        #btn-stop { background-color: var(--primary-red); color: white; display: none; }
+        .status { margin-top: 15px; font-size: 0.9rem; color: #666; }
+        #log {
+            margin-top: 20px;
+            font-size: 0.8rem;
+            text-align: left;
+            background: #eee;
+            padding: 10px;
+            border-radius: 4px;
+            max-height: 100px;
+            overflow-y: auto;
+            width: 100%;
+            box-sizing: border-box;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>定点観測カメラ</h1>
+        <video id="video" autoplay playsinline muted></video>
+        <div class="controls">
+            <button id="btn-start">撮影開始</button>
+            <button id="btn-stop">撮影停止</button>
+        </div>
+        <div class="status" id="status-text">待機中...</div>
+        <div id="log"></div>
+    </div>
+
+    <script src="https://unpkg.com/nosleep.js/dist/NoSleep.min.js"></script>
+    <script>
+        const video = document.getElementById('video');
+        const btnStart = document.getElementById('btn-start');
+        const btnStop = document.getElementById('btn-stop');
+        const statusText = document.getElementById('status-text');
+        const log = document.getElementById('log');
+        const noSleep = new NoSleep();
+
+        let intervalId = null;
+        const INTERVAL_MS = 60000; // 60秒
+
+        function addLog(msg) {
+            const time = new Date().toLocaleTimeString();
+            log.innerHTML = `[${time}] ${msg}<br>` + log.innerHTML;
+        }
+
+        // カメラ起動
+        async function initCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: { ideal: "environment" } }, // idealを使ってフォールバックしやすく
+                    audio: false
+                });
+                video.srcObject = stream;
+                addLog("カメラを起動しました");
+            } catch (err) {
+                addLog("カメラ起動失敗: " + err.message);
+                alert("カメラの許可が必要です。");
+            }
+        }
+
+        // 初期化実行
+        initCamera();
+
+        btnStart.addEventListener('click', async () => {
+            noSleep.enable();
+            addLog("スリープ防止を有効化しました");
+
+            btnStart.style.display = 'none';
+            btnStop.style.display = 'inline-block';
+            statusText.innerText = "観測中...";
+
+            // 初回撮影
+            captureAndUpload();
+
+            // 定期実行
+            intervalId = setInterval(captureAndUpload, INTERVAL_MS);
+        });
+
+        btnStop.addEventListener('click', () => {
+            noSleep.disable();
+            clearInterval(intervalId);
+            btnStart.style.display = 'inline-block';
+            btnStop.style.display = 'none';
+            statusText.innerText = "停止中";
+            addLog("撮影を停止しました");
+        });
+
+        async function captureAndUpload() {
+            addLog("撮影中...");
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+
+            // iPhone 7 Plus の性能を考慮し、最大幅 800px に縮小
+            const maxWidth = 800;
+            const scale = maxWidth / video.videoWidth;
+            canvas.width = maxWidth;
+            canvas.height = video.videoHeight * scale;
+
+            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            // JPEG圧縮 (品質 0.6)
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
+            const base64Data = dataUrl.split(',')[1];
+
+            try {
+                const response = await fetch('/api/upload', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ image: base64Data })
+                });
+
+                if (response.ok) {
+                    addLog("送信成功");
+                } else {
+                    const err = await response.text();
+                    addLog("送信失敗: " + err);
+                }
+            } catch (err) {
+                addLog("通信エラー: " + err.message);
+            }
+        }
+    </script>
+</body>
+</html>
