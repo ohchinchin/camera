@@ -5,7 +5,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(405).send('Method Not Allowed');
   }
 
-  const { image } = req.body; // Base64 (without prefix)
+  const { image, caption } = req.body; // Base64 (without prefix) and optional caption
   const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
 
   if (!webhookUrl) {
@@ -24,7 +24,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const formData = new FormData();
     const blob = new Blob([buffer], { type: 'image/jpeg' });
     formData.append('file', blob, 'capture.jpg');
-    formData.append('content', `Captured at ${new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}`);
+    
+    // キャプションがあればそれを使用、なければ時刻のみ
+    const content = caption || `Captured at ${new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}`;
+    formData.append('content', content);
 
     const response = await fetch(webhookUrl, {
       method: 'POST',

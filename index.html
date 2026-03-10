@@ -54,6 +54,30 @@
             margin-bottom: 10px;
         }
         .settings-row:last-child { margin-bottom: 0; }
+        .toggle-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 0.85rem;
+            color: #444;
+            margin-top: 10px;
+        }
+        #video-container {
+            position: relative;
+            width: 100%;
+            margin-bottom: 15px;
+        }
+        #burn-in-overlay {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: black;
+            border-radius: 8px;
+            display: none;
+            justify-content: center;
+            align-items: center;
+            color: #444;
+            font-size: 0.8rem;
+        }
         input[type="number"], input[type="time"] {
             padding: 8px;
             border: 1px solid #ddd;
@@ -98,7 +122,11 @@
 <body>
     <div class="container">
         <h1>定点観測カメラ</h1>
-        <video id="video" autoplay playsinline muted></video>
+        
+        <div id="video-container">
+            <video id="video" autoplay playsinline muted></video>
+            <div id="burn-in-overlay">焼き付き防止モード動作中...</div>
+        </div>
 
         <div class="settings">
             <div class="settings-row">
@@ -113,8 +141,9 @@
                 <label>終了時刻:</label>
                 <input type="time" id="setting-end" value="18:00">
             </div>
-            <div style="font-size: 0.7rem; color: #888; margin-top: 5px;">
-                ※スケジュール外は送信をスキップします。
+            <div class="toggle-row">
+                <input type="checkbox" id="setting-burn-in">
+                <label for="setting-burn-in">焼き付き防止（プレビュー非表示）</label>
             </div>
         </div>
 
@@ -143,9 +172,22 @@
         const inputInterval = document.getElementById('setting-interval');
         const inputStart = document.getElementById('setting-start');
         const inputEnd = document.getElementById('setting-end');
+        const inputBurnIn = document.getElementById('setting-burn-in');
+        const burnInOverlay = document.getElementById('burn-in-overlay');
 
         const noSleep = new NoSleep();
         let intervalId = null;
+
+        // 焼き付き防止の切り替え
+        inputBurnIn.addEventListener('change', () => {
+            if (inputBurnIn.checked) {
+                video.style.opacity = "0";
+                burnInOverlay.style.display = "flex";
+            } else {
+                video.style.opacity = "1";
+                burnInOverlay.style.display = "none";
+            }
+        });
 
         function addLog(msg) {
             const time = new Date().toLocaleTimeString();
@@ -167,6 +209,19 @@
 
         initCamera();
 
+        // バッテリー情報取得 (iOSでは制限される可能性あり)
+        async function getBatteryInfo() {
+            try {
+                if (navigator.getBattery) {
+                    const battery = await navigator.getBattery();
+                    const level = Math.round(battery.level * 100);
+                    const charging = battery.charging ? "充電中" : "放電中";
+                    return `バッテリー: ${level}% (${charging})`;
+                }
+            } catch (e) {}
+            return "バッテリー情報: 取得不可";
+        }
+
         // スケジュール判定 (HH:mm 形式)
         function isWithinSchedule() {
             const now = new Date();
@@ -178,7 +233,6 @@
             const startTime = startH * 60 + startM;
             const endTime = endH * 60 + endM;
 
-            // 終了が開始より前（日またぎ）の場合
             if (endTime < startTime) {
                 return currentTime >= startTime || currentTime <= endTime;
             }
@@ -193,13 +247,9 @@
             btnStop.style.display = 'block';
             statusText.innerText = "観測中";
             
-            const intervalMinutes = parseInt(inputInterval.value) || 60;
-            const intervalMs = intervalMinutes * 60000;
-
-            // 初回実行
             runCycle();
-
-            intervalId = setInterval(runCycle, intervalMs);
+            const intervalMinutes = parseInt(inputInterval.value) || 60;
+            intervalId = setInterval(runCycle, intervalMinutes * 60000);
         });
 
         btnStop.addEventListener('click', () => {
@@ -214,15 +264,22 @@
 
         async function runCycle() {
             if (isWithinSchedule()) {
-                await captureAndUpload();
+                await captureAndUploadWithRetry(0);
             } else {
-                addLog("スケジュール外のためスキップしました");
+                addLog("スケジュール外のためスキップ");
             }
             
-            // 次回予定の表示
             const intervalMinutes = parseInt(inputInterval.value) || 60;
             const next = new Date(Date.now() + intervalMinutes * 60000);
             nextShotText.innerText = `次回撮影予定: ${next.toLocaleTimeString()}`;
+        }
+
+        async function captureAndUploadWithRetry(retryCount) {
+            const success = await captureAndUpload();
+            if (!success && retryCount < 1) {
+                addLog("10秒後にリトライします...");
+                setTimeout(() => captureAndUploadWithRetry(retryCount + 1), 10000);
+            }
         }
 
         async function captureAndUpload() {
@@ -233,25 +290,42 @@
             const scale = maxWidth / video.videoWidth;
             canvas.width = maxWidth;
             canvas.height = video.videoHeight * scale;
+            
+            // 画像描画
             context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            // タイムスタンプ合成 (Feature 2)
+            const now = new Date();
+            const timestamp = now.toLocaleString('ja-JP');
+            context.fillStyle = "rgba(0, 0, 0, 0.5)";
+            context.fillRect(0, canvas.height - 30, canvas.width, 30);
+            context.fillStyle = "white";
+            context.font = "16px sans-serif";
+            context.fillText(timestamp, 10, canvas.height - 8);
 
             const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
             const base64Data = dataUrl.split(',')[1];
+            
+            const battery = await getBatteryInfo();
+            const caption = `${timestamp}\n${battery}`;
 
             try {
                 const response = await fetch('/api/upload', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ image: base64Data })
+                    body: JSON.stringify({ image: base64Data, caption: caption })
                 });
 
                 if (response.ok) {
                     addLog("送信成功");
+                    return true;
                 } else {
                     addLog("送信失敗: " + await response.text());
+                    return false;
                 }
             } catch (err) {
                 addLog("通信エラー: " + err.message);
+                return false;
             }
         }
     </script>
