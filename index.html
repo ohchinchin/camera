@@ -204,20 +204,43 @@
         const noSleep = new NoSleep();
         let intervalId = null;
 
-        // 感度表示の更新
-        inputThreshold.addEventListener('input', () => {
-            thresholdValue.innerText = inputThreshold.value;
-        });
+        // --- 設定の保存と復元 ---
+        const SETTINGS_KEY = 'camera_app_settings';
 
-        // カウントのリセット
-        btnResetCount.addEventListener('click', () => {
-            totalCrossed = 0;
-            countDisplay.innerText = totalCrossed;
-            addLog("カウントを手動リセットしました");
-        });
+        function saveSettings() {
+            const settings = {
+                interval: inputInterval.value,
+                start: inputStart.value,
+                end: inputEnd.value,
+                burnIn: inputBurnIn.checked,
+                counterMode: inputCounterMode.checked,
+                threshold: inputThreshold.value
+            };
+            localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+        }
 
-        // 焼き付き防止の切り替え
-        inputBurnIn.addEventListener('change', () => {
+        function loadSettings() {
+            const saved = localStorage.getItem(SETTINGS_KEY);
+            if (saved) {
+                try {
+                    const settings = JSON.parse(saved);
+                    inputInterval.value = settings.interval || 60;
+                    inputStart.value = settings.start || "09:00";
+                    inputEnd.value = settings.end || "18:00";
+                    inputBurnIn.checked = settings.burnIn || false;
+                    inputCounterMode.checked = (settings.counterMode !== undefined) ? settings.counterMode : true;
+                    inputThreshold.value = settings.threshold || 0.6;
+                    
+                    // 反映後の表示更新
+                    thresholdValue.innerText = inputThreshold.value;
+                    applyBurnIn(); 
+                } catch (e) {
+                    console.error("設定復元失敗", e);
+                }
+            }
+        }
+
+        function applyBurnIn() {
             if (inputBurnIn.checked) {
                 video.style.opacity = "0";
                 burnInOverlay.style.display = "flex";
@@ -225,7 +248,26 @@
                 video.style.opacity = "1";
                 burnInOverlay.style.display = "none";
             }
+        }
+
+        // イベントリスナーの一括登録
+        [inputInterval, inputStart, inputEnd, inputThreshold].forEach(el => {
+            el.addEventListener('change', saveSettings);
         });
+        inputCounterMode.addEventListener('change', saveSettings);
+        inputThreshold.addEventListener('input', () => {
+            thresholdValue.innerText = inputThreshold.value;
+            saveSettings();
+        });
+
+        // 焼き付き防止の切り替え
+        inputBurnIn.addEventListener('change', () => {
+            applyBurnIn();
+            saveSettings();
+        });
+
+        loadSettings(); // ページ読み込み時に復元
+        // --- 設定の保存と復元 ここまで ---
 
         function addLog(msg) {
             const time = new Date().toLocaleTimeString();
@@ -251,13 +293,51 @@
         let model = null;
         let totalCrossed = 0;
         let prevPersonPositions = [];
-        let lastUploadTime = new Date(); // 測定開始時刻を保持
+        let lastUploadTime = new Date();
 
         async function loadModel() {
-            addLog("AIモデル読み込み中... (数MBあります)");
-            model = await cocoSsd.load();
-            addLog("AIモデル準備完了");
-            detectFrame();
+            const MODEL_CACHE_PATH = 'indexeddb://coco-ssd-model-v2';
+            addLog("AIエンジン初期化中...");
+
+            // 1. ライブラリがロードされているか確認
+            if (typeof tf === 'undefined' || typeof cocoSsd === 'undefined') {
+                addLog("エラー: AIライブラリが読み込まれていません。ページをリロードしてください。");
+                return;
+            }
+
+            try {
+                // iOS SafariでのWebGL初期化を安定させる
+                await tf.ready();
+                addLog("TensorFlow.js準備完了 (" + tf.getBackend() + ")");
+
+                try {
+                    addLog("キャッシュからモデルをロード中...");
+                    model = await cocoSsd.load({ modelUrl: MODEL_CACHE_PATH });
+                    addLog("キャッシュから復元しました（高速）");
+                } catch (e) {
+                    addLog("キャッシュなし、または復元失敗。新規ロード開始...");
+                    model = await cocoSsd.load();
+                    addLog("モデルのダウンロードが完了しました");
+                    
+                    try {
+                        await model.model.save(MODEL_CACHE_PATH);
+                        addLog("モデルをキャッシュに保存しました");
+                    } catch (saveErr) {
+                        addLog("キャッシュ保存失敗 (容量不足など): " + saveErr.message);
+                    }
+                }
+                
+                // ビデオが再生可能になるまで待機
+                if (video.readyState < 2) {
+                    addLog("カメラ映像の準備を待っています...");
+                    await new Promise(resolve => video.onloadeddata = resolve);
+                }
+                
+                addLog("AI検知ループを開始します");
+                detectFrame();
+            } catch (err) {
+                addLog("AI起動致命的エラー: " + err.message);
+            }
         }
 
         async function detectFrame() {
