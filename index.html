@@ -127,7 +127,7 @@
 <body>
     <div class="container">
         <h1>定点観測カメラ + 人数カウント</h1>
-        <div style="font-size: 0.7rem; color: #888; margin-top: -10px; margin-bottom: 15px;">Ver. 1.1.0 (PWA/Cache Optimized)</div>
+        <div style="font-size: 0.7rem; color: #888; margin-top: -10px; margin-bottom: 15px;">Ver. 1.1.2 (High-Speed Rendering)</div>
         
         <div id="video-container">
             <video id="video" autoplay playsinline muted></video>
@@ -305,84 +305,103 @@
             const MODEL_CACHE_PATH = 'indexeddb://coco-ssd-model-v2';
             addLog("AIエンジン初期化中...");
 
-            // 1. ライブラリがロードされているか確認
             if (typeof tf === 'undefined' || typeof cocoSsd === 'undefined') {
-                addLog("エラー: AIライブラリが読み込まれていません。ページをリロードしてください。");
+                addLog("エラー: AIライブラリ読み込み失敗");
                 return;
             }
 
             try {
-                // iOS SafariでのWebGL初期化を安定させる
                 await tf.ready();
                 addLog("TensorFlow.js準備完了 (" + tf.getBackend() + ")");
 
                 try {
-                    addLog("キャッシュからモデルをロード中...");
+                    addLog("キャッシュからロード中...");
                     model = await cocoSsd.load({ modelUrl: MODEL_CACHE_PATH });
-                    addLog("キャッシュから復元しました（高速）");
+                    addLog("キャッシュから復元成功");
                 } catch (e) {
-                    addLog("キャッシュなし、または復元失敗。新規ロード開始...");
+                    addLog("新規ダウンロード中...");
                     model = await cocoSsd.load();
-                    addLog("モデルのダウンロードが完了しました");
-                    
+                    addLog("モデル取得完了");
                     try {
                         await model.model.save(MODEL_CACHE_PATH);
-                        addLog("モデルをキャッシュに保存しました");
-                    } catch (saveErr) {
-                        addLog("キャッシュ保存失敗 (容量不足など): " + saveErr.message);
-                    }
+                        addLog("キャッシュ保存成功");
+                    } catch (saveErr) {}
                 }
                 
-                // ビデオが再生可能になるまで待機
                 if (video.readyState < 2) {
-                    addLog("カメラ映像の準備を待っています...");
                     await new Promise(resolve => video.onloadeddata = resolve);
                 }
                 
-                addLog("AI検知ループを開始します");
+                addLog("AI検知開始");
                 detectFrame();
             } catch (err) {
                 addLog("AI起動致命的エラー: " + err.message);
             }
         }
 
+        let latestPredictions = [];
+
         async function detectFrame() {
             if (model && inputCounterMode.checked) {
-                const predictions = await model.detect(video);
-                // 設定された感度（threshold）でフィルタリング
-                const filtered = predictions.filter(p => p.score >= parseFloat(inputThreshold.value));
-                processDetections(filtered);
+                try {
+                    const predictions = await model.detect(video);
+                    latestPredictions = predictions.filter(p => p.score >= parseFloat(inputThreshold.value));
+                    processDetections(latestPredictions);
+                } catch (err) {
+                    console.error("検知エラー:", err);
+                }
             }
-            requestAnimationFrame(detectFrame);
+            // 負荷軽減のため100ms待機
+            setTimeout(detectFrame, 100);
         }
 
-        function processDetections(predictions) {
+        // 描画専用ループ（AIが重くてもラインは常に描く）
+        function renderLoop() {
             overlay.width = video.videoWidth;
             overlay.height = video.videoHeight;
             ctxOverlay.clearRect(0, 0, overlay.width, overlay.height);
 
-            // 垂直ライン (中央)
-            const lineX = overlay.width / 2;
-            ctxOverlay.strokeStyle = "red";
-            ctxOverlay.lineWidth = 5;
-            ctxOverlay.beginPath(); ctxOverlay.moveTo(lineX, 0); ctxOverlay.lineTo(lineX, overlay.height); ctxOverlay.stroke();
+            if (overlay.width > 0) {
+                const lineX = overlay.width / 2;
+                ctxOverlay.strokeStyle = "red";
+                ctxOverlay.lineWidth = 5;
+                ctxOverlay.beginPath(); 
+                ctxOverlay.moveTo(lineX, 0); 
+                ctxOverlay.lineTo(lineX, overlay.height); 
+                ctxOverlay.stroke();
 
+                if (inputCounterMode.checked) {
+                    latestPredictions.forEach(p => {
+                        if (p.class === "person") {
+                            const [x, y, w, h] = p.bbox;
+                            ctxOverlay.strokeStyle = "#00FF00"; 
+                            ctxOverlay.lineWidth = 2; 
+                            ctxOverlay.strokeRect(x, y, w, h);
+                        }
+                    });
+                }
+            }
+            requestAnimationFrame(renderLoop);
+        }
+
+        renderLoop();
+
+        function processDetections(predictions) {
             const currentPersons = predictions.filter(p => p.class === "person");
             const currentPositions = [];
+            const lineX = video.videoWidth / 2;
 
             currentPersons.forEach(person => {
                 const [x, y, width, height] = person.bbox;
                 const centerX = x + width / 2;
                 currentPositions.push(centerX);
-                ctxOverlay.strokeStyle = "#00FF00"; ctxOverlay.lineWidth = 2; ctxOverlay.strokeRect(x, y, width, height);
 
-                // 左右の通過判定 (前回と今回の centerX を比較)
                 const prevX = prevPersonPositions.find(px => Math.abs(px - centerX) < 100);
                 if (prevX !== undefined) {
                     if ((prevX < lineX && centerX >= lineX) || (prevX > lineX && centerX <= lineX)) {
                         totalCrossed++;
                         countDisplay.innerText = totalCrossed;
-                        addLog("通過(左右)を検知！累計: " + totalCrossed);
+                        addLog("通過を検知！累計: " + totalCrossed);
                     }
                 }
             });
@@ -391,30 +410,26 @@
 
         loadModel();
 
-        // バッテリー情報取得
+        // バッテリー情報
         async function getBatteryInfo() {
             try {
                 if (navigator.getBattery) {
                     const battery = await navigator.getBattery();
-                    const level = Math.round(battery.level * 100);
-                    const charging = battery.charging ? "充電中" : "放電中";
-                    return `バッテリー: ${level}% (${charging})`;
+                    return `バッテリー: ${Math.round(battery.level * 100)}% (${battery.charging ? "充電中" : "放電中"})`;
                 }
             } catch (e) {}
-            return "バッテリー情報: 取得不可";
+            return "バッテリー情報: 不可";
         }
 
-        // スケジュール判定
         function isWithinSchedule() {
             const now = new Date();
             const currentTime = now.getHours() * 60 + now.getMinutes();
-            const [startH, startM] = inputStart.value.split(':').map(Number);
-            const [endH, endM] = inputEnd.value.split(':').map(Number);
-            const startTime = startH * 60 + startM;
-            const endTime = endH * 60 + endM;
-
-            if (endTime < startTime) return currentTime >= startTime || currentTime <= endTime;
-            return currentTime >= startTime && currentTime <= endTime;
+            const [sh, sm] = inputStart.value.split(':').map(Number);
+            const [eh, em] = inputEnd.value.split(':').map(Number);
+            const st = sh * 60 + sm;
+            const et = eh * 60 + em;
+            if (et < st) return currentTime >= st || currentTime <= et;
+            return currentTime >= st && currentTime <= et;
         }
 
         btnStart.addEventListener('click', async () => {
@@ -424,8 +439,8 @@
             btnStop.style.display = 'block';
             statusText.innerText = "観測中";
             runCycle();
-            const intervalMinutes = parseInt(inputInterval.value) || 60;
-            intervalId = setInterval(runCycle, intervalMinutes * 60000);
+            const min = parseInt(inputInterval.value) || 60;
+            intervalId = setInterval(runCycle, min * 60000);
         });
 
         btnStop.addEventListener('click', () => {
@@ -435,7 +450,7 @@
             btnStop.style.display = 'none';
             statusText.innerText = "停止中";
             nextShotText.innerText = "";
-            addLog("停止しました");
+            addLog("停止");
         });
 
         async function runCycle() {
@@ -444,8 +459,8 @@
             } else {
                 addLog("スケジュール外スキップ");
             }
-            const intervalMinutes = parseInt(inputInterval.value) || 60;
-            const next = new Date(Date.now() + intervalMinutes * 60000);
+            const min = parseInt(inputInterval.value) || 60;
+            const next = new Date(Date.now() + min * 60000);
             nextShotText.innerText = `次回撮影予定: ${next.toLocaleTimeString()}`;
         }
 
@@ -465,7 +480,6 @@
             canvas.width = maxWidth; canvas.height = video.videoHeight * scale;
             context.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-            // タイムスタンプ合成
             const now = new Date();
             const timestamp = now.toLocaleString('ja-JP');
             const periodStart = lastUploadTime.toLocaleString('ja-JP');
@@ -478,9 +492,8 @@
 
             const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
             const base64Data = dataUrl.split(',')[1];
-            
             const battery = await getBatteryInfo();
-            const caption = `【👤 人数カウント報告】\n📅 測定期間: ${periodStart} 〜 ${periodEnd}\n👥 通過人数: ${totalCrossed} 人\n${battery}`;
+            const caption = `【👤 人数カウント報告】\n📅 期間: ${periodStart} 〜 ${periodEnd}\n👥 通過人数: ${totalCrossed} 人\n${battery}`;
 
             try {
                 const response = await fetch('/api/upload', {
@@ -488,12 +501,11 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ image: base64Data, caption: caption })
                 });
-
                 if (response.ok) {
-                    addLog("送信成功（カウントをリセット）");
-                    totalCrossed = 0; // 送信後にカウントリセット
+                    addLog("送信成功（カウントリセット）");
+                    totalCrossed = 0;
                     countDisplay.innerText = totalCrossed;
-                    lastUploadTime = new Date(); // 次回の開始時刻を更新
+                    lastUploadTime = new Date();
                     return true;
                 }
                 return false;
@@ -502,13 +514,12 @@
             }
         }
 
-        // Service Workerの登録
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
                 navigator.serviceWorker.register('sw.js').then(reg => {
-                    console.log('SW registered:', reg);
+                    console.log('SW registered');
                 }).catch(err => {
-                    console.log('SW reg failed:', err);
+                    console.log('SW failed', err);
                 });
             });
         }
